@@ -1,0 +1,5 @@
+python-telegram-bot
+requests
+ollama
+yt-dlp
+imageio-ffmpeg
