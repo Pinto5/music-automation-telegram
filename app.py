@@ -3,13 +3,16 @@ import telegram
 import os
 import ollama_run as olm
 import yt_dlp_music as dlp
+from db.connection import create_tables
+from db.setup_db import create_database
+from db.queries import insert_data_users, insert_data_interactions
 
 
 # Número máximo de mensagens processadas ao mesmo tempo
 MAX_CONCURRENT_UPDATES = 3
 
 
-async def process_update(bot, update, api_key, semaphore, download_lock):
+async def process_update(bot, update, api_key, semaphore, download_lock, mysql_pw):
     # Limita quantas mensagens podem estar a ser processadas ao mesmo tempo
     async with semaphore:
 
@@ -23,9 +26,18 @@ async def process_update(bot, update, api_key, semaphore, download_lock):
 
         # Guarda o texto enviado pelo utilizador
         message_received = update.message.text
+        
+        # Guarda id e username do utilizador
+        telegram_user_id = update.effective_user.id
+        username = update.effective_user.username
+
+        # Insere o utilizador na db
+        insert_data_users(mysql_pw, telegram_user_id, username, chat_id)
 
         # Tenta encontrar um link do YouTube na mensagem
         link = dlp.save_link(message_received)
+        
+        insert_data_interactions(mysql_pw, update.update_id, telegram_user_id, chat_id, "user", message_received, link, "RECEIVED")
 
         # Começa sem metadados do vídeo
         video_info = None
@@ -38,10 +50,12 @@ async def process_update(bot, update, api_key, semaphore, download_lock):
         try:
             # Se não houver link e a mensagem parecer sem sentido, responde sem chamar o Ollama
             if not link and olm.is_probably_gibberish(message_received):
+                text_nlink_gibberish = "Não percebi a tua mensagem. Envia uma mensagem sobre música e/ou um link do YouTube."
                 await bot.send_message(
                     chat_id=chat_id,
-                    text="Não percebi a tua mensagem. Envia uma mensagem sobre música e/ou um link do YouTube."
+                    text=text_nlink_gibberish
                 )
+                insert_data_interactions(mysql_pw, update.update_id, telegram_user_id, chat_id, "bot", text_nlink_gibberish, None, "NO LINK AND GIBBERISH")
                 return
 
             # Chama o Ollama numa thread separada para não bloquear o loop assíncrono
@@ -59,27 +73,44 @@ async def process_update(bot, update, api_key, semaphore, download_lock):
                     chat_id=chat_id,
                     text=message_to_send
                 )
+                insert_data_interactions(mysql_pw, update.update_id, telegram_user_id, chat_id, "bot", message_to_send, None, "SENT")
 
             # Se o Ollama não devolver texto útil, envia uma resposta padrão
             else:
+                text_ollama_no_message = "Recebi a tua mensagem. Vou tentar processar o áudio se houver link."
                 await bot.send_message(
                     chat_id=chat_id,
-                    text="Recebi a tua mensagem. Vou tentar processar o áudio se houver link."
+                    text=text_ollama_no_message
                 )
+                if link:
+                    insert_data_interactions(mysql_pw, update.update_id, telegram_user_id, chat_id, "bot", text_ollama_no_message, link, "OLLAMA WITHOUT MESSAGE")
+                else:
+                    insert_data_interactions(mysql_pw, update.update_id, telegram_user_id, chat_id, "bot", text_ollama_no_message, None, "OLLAMA WITHOUT MESSAGE")
 
         except Exception as e:
             print(f"Ollama falhou: {e}")
-            await bot.send_message(
-                chat_id=chat_id,
-                text="Não consegui gerar uma resposta, mas vou tentar processar o áudio se houver link."
-            )
+            
+            if link:
+                text_ollama_failed_link = "Não consegui gerar uma resposta, mas vou tentar processar o áudio."
+                await bot.send_message(
+                    chat_id=chat_id,
+                    text=text_ollama_failed_link
+                )
+                insert_data_interactions(mysql_pw, update.update_id, telegram_user_id, chat_id, "bot", text_ollama_failed_link, link, "OLLAMA FAILED")
+            else:
+                text_ollama_failed = "Não consegui gerar uma resposta."
+                await bot.send_message(
+                    chat_id=chat_id,
+                    text=text_ollama_failed
+                )
+                insert_data_interactions(mysql_pw, update.update_id, telegram_user_id, chat_id, "bot", text_ollama_failed, None, "OLLAMA FAILED")
 
         if link:
 
             # Impede conflitos se duas tarefas tentarem usar o mesmo ficheiro ao mesmo tempo
             async with download_lock:
 
-                # Faz o download numa thread separada porque yt_dlp é bloqueante
+                # Faz o download numa thread separada
                 audio_path = await asyncio.to_thread(dlp.download_music, link)
 
                 # Se o download tiver criado um ficheiro válido, envia o áudio
@@ -113,14 +144,14 @@ async def process_update(bot, update, api_key, semaphore, download_lock):
         print("Mensagem enviada para:", chat_id)
 
 
-async def main(token, api_key):
+async def main(token, api_key, mysql_pw):
 
     if not token:
         raise Exception("TELEGRAM_BOT_TOKEN não está definido.")
 
-
     if not api_key:
         raise Exception("OLLAMA_API_KEY não está definida.")
+    
 
     # Cria o objeto do bot
     bot = telegram.Bot(token)
@@ -173,7 +204,8 @@ async def main(token, api_key):
                         update,
                         api_key,
                         semaphore,
-                        download_lock
+                        download_lock,
+                        mysql_pw
                     )
                 )
 
@@ -186,5 +218,20 @@ if __name__ == "__main__":
 
     token = os.getenv("TELEGRAM_BOT_TOKEN")
     api_key = os.getenv("OLLAMA_API_KEY")
+    mysql_pw = os.getenv("MYSQL_PW")
 
-    asyncio.run(main(token, api_key))
+    if not mysql_pw:
+        raise Exception("MYSQL_PW não está definida.")
+    
+    create_database(mysql_pw)
+    create_tables(mysql_pw)
+
+    asyncio.run(main(token, api_key, mysql_pw))
+
+
+# IMPLEMENTAR UMA DB PARA:
+# historico de musicas perdidas (o utilizador poderia pedir a lista de musicas que pediu)
+# permitir ao utilizador para guardar musicas nos favoritos com o comando /favoritos
+# guardar e enviar links e metadados repetidos
+# saber as estatisticas do bot
+# talvez limitar pedidos de download por utilizador

@@ -217,10 +217,35 @@ def is_bot_identity_question(text):
 
     return text in identity_questions
 
+def is_greeting(text):
+    if not text:
+        return False
+
+    text = text.strip().lower()
+    text = re.sub(r"[?!.,;:]+", "", text)
+
+    greetings = {
+        "ola",
+        "olá",
+        "oi",
+        "boas",
+        "bom dia",
+        "boa tarde",
+        "boa noite",
+        "hey",
+        "hello",
+        "hi"
+    }
+
+    return text in greetings
+
 def ollama_run(message_received, api_key, link=None, video_info = None):
     if not api_key:
         raise Exception("API key do Ollama não existe.")
     
+    if is_greeting(message_received):
+        return "Olá! Sou um bot assistente de música. Posso ajudar-te com músicas, artistas, álbuns, géneros musicais e links do YouTube."
+
     if is_bot_identity_question(message_received):
         return "Sou um bot de música no Telegram. Posso ajudar-te com músicas, artistas, álbuns, géneros musicais e links do YouTube."
     

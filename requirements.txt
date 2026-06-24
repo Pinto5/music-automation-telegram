@@ -3,3 +3,4 @@ requests
 ollama
 yt-dlp
 imageio-ffmpeg
+mysql-connector-python
