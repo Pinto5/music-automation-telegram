@@ -31,3 +31,18 @@ def insert_data_interactions(MYSQL_PW, interaction_id, telegram_user_id, chat_id
 
     cursor.close()
     connection.close()
+
+def user_exists(MYSQL_PW, telegram_user_id):
+    connection = connect_database(MYSQL_PW)
+    cursor = connection.cursor()
+
+    sql = "SELECT 1 FROM users WHERE telegram_user_id = %s LIMIT 1"
+
+    cursor.execute(sql, (telegram_user_id, ))
+
+    exists = cursor.fetchone() is not None # Procura apenas 1 linha (True or False)
+
+    cursor.close()
+    connection.close()
+
+    return exists

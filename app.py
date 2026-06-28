@@ -5,7 +5,7 @@ import ollama_run as olm
 import yt_dlp_music as dlp
 from db.connection import create_tables
 from db.setup_db import create_database
-from db.queries import insert_data_users, insert_data_interactions
+from db.queries import insert_data_users, insert_data_interactions, user_exists
 
 
 # Número máximo de mensagens processadas ao mesmo tempo
@@ -26,122 +26,149 @@ async def process_update(bot, update, api_key, semaphore, download_lock, mysql_p
 
         # Guarda o texto enviado pelo utilizador
         message_received = update.message.text
+        message_start = "/start"
+
         
         # Guarda id e username do utilizador
         telegram_user_id = update.effective_user.id
         username = update.effective_user.username
 
-        # Insere o utilizador na db
-        insert_data_users(mysql_pw, telegram_user_id, username, chat_id)
+        if message_received == message_start:
 
-        # Tenta encontrar um link do YouTube na mensagem
-        link = dlp.save_link(message_received)
-        
-        insert_data_interactions(mysql_pw, update.update_id, telegram_user_id, chat_id, "user", message_received, link, "RECEIVED")
+            welcome_text = "Bem-vindo! Já podes usar o bot."
 
-        # Começa sem metadados do vídeo
-        video_info = None
+            # Insere o utilizador na db depois de fazer /start
+            insert_data_users(mysql_pw, telegram_user_id, username, chat_id)
 
-        # Se existir link, tenta obter informações do vídeo
-        if link:
-            video_info = await asyncio.to_thread(dlp.get_video_info, link)
-            print("VIDEO INFO:", video_info)
+            insert_data_interactions(mysql_pw, update.update_id, telegram_user_id, chat_id, "user", message_received, None, "START RECEIVED")
 
-        try:
-            # Se não houver link e a mensagem parecer sem sentido, responde sem chamar o Ollama
-            if not link and olm.is_probably_gibberish(message_received):
-                text_nlink_gibberish = "Não percebi a tua mensagem. Envia uma mensagem sobre música e/ou um link do YouTube."
-                await bot.send_message(
-                    chat_id=chat_id,
-                    text=text_nlink_gibberish
-                )
-                insert_data_interactions(mysql_pw, update.update_id, telegram_user_id, chat_id, "bot", text_nlink_gibberish, None, "NO LINK AND GIBBERISH")
-                return
-
-            # Chama o Ollama numa thread separada para não bloquear o loop assíncrono
-            message_to_send = await asyncio.to_thread(
-                olm.ollama_run,
-                message_received,
-                api_key,
-                link,
-                video_info
+            await bot.send_message(
+                chat_id=chat_id,
+                text=welcome_text
             )
 
-            # Se o Ollama devolver uma resposta válida, envia-a ao utilizador
-            if message_to_send and message_to_send.strip():
-                await bot.send_message(
-                    chat_id=chat_id,
-                    text=message_to_send
-                )
-                insert_data_interactions(mysql_pw, update.update_id, telegram_user_id, chat_id, "bot", message_to_send, None, "SENT")
+            insert_data_interactions(mysql_pw, update.update_id, telegram_user_id, chat_id, "bot", welcome_text, None, "START")
 
-            # Se o Ollama não devolver texto útil, envia uma resposta padrão
-            else:
-                text_ollama_no_message = "Recebi a tua mensagem. Vou tentar processar o áudio se houver link."
-                await bot.send_message(
-                    chat_id=chat_id,
-                    text=text_ollama_no_message
-                )
-                if link:
-                    insert_data_interactions(mysql_pw, update.update_id, telegram_user_id, chat_id, "bot", text_ollama_no_message, link, "OLLAMA WITHOUT MESSAGE")
-                else:
-                    insert_data_interactions(mysql_pw, update.update_id, telegram_user_id, chat_id, "bot", text_ollama_no_message, None, "OLLAMA WITHOUT MESSAGE")
-
-        except Exception as e:
-            print(f"Ollama falhou: {e}")
+        elif user_exists(mysql_pw, telegram_user_id):
             
+            # Tenta encontrar um link do YouTube na mensagem
+            link = dlp.save_link(message_received)
+            
+            insert_data_interactions(mysql_pw, update.update_id, telegram_user_id, chat_id, "user", message_received, link, "RECEIVED")
+
+            # Começa sem metadados do vídeo
+            video_info = None
+
+            # Se existir link, tenta obter informações do vídeo
             if link:
-                text_ollama_failed_link = "Não consegui gerar uma resposta, mas vou tentar processar o áudio."
-                await bot.send_message(
-                    chat_id=chat_id,
-                    text=text_ollama_failed_link
+                video_info = await asyncio.to_thread(dlp.get_video_info, link)
+                print("VIDEO INFO:", video_info)
+
+            try:
+                # Se não houver link e a mensagem parecer sem sentido, responde sem chamar o Ollama
+                if not link and olm.is_probably_gibberish(message_received):
+                    text_nlink_gibberish = "Não percebi a tua mensagem. Envia uma mensagem sobre música e/ou um link do YouTube."
+                    await bot.send_message(
+                        chat_id=chat_id,
+                        text=text_nlink_gibberish
+                    )
+                    insert_data_interactions(mysql_pw, update.update_id, telegram_user_id, chat_id, "bot", text_nlink_gibberish, None, "NO LINK AND GIBBERISH")
+                    return
+
+                # Chama o Ollama numa thread separada para não bloquear o loop assíncrono
+                message_to_send = await asyncio.to_thread(
+                    olm.ollama_run,
+                    message_received,
+                    api_key,
+                    link,
+                    video_info
                 )
-                insert_data_interactions(mysql_pw, update.update_id, telegram_user_id, chat_id, "bot", text_ollama_failed_link, link, "OLLAMA FAILED")
+
+                # Se o Ollama devolver uma resposta válida, envia-a ao utilizador
+                if message_to_send and message_to_send.strip():
+                    await bot.send_message(
+                        chat_id=chat_id,
+                        text=message_to_send
+                    )
+                    insert_data_interactions(mysql_pw, update.update_id, telegram_user_id, chat_id, "bot", message_to_send, None, "SENT")
+
+                # Se o Ollama não devolver texto útil, envia uma resposta padrão
+                else:
+                    text_ollama_no_message = "Recebi a tua mensagem. Vou tentar processar o áudio se houver link."
+                    await bot.send_message(
+                        chat_id=chat_id,
+                        text=text_ollama_no_message
+                    )
+                    if link:
+                        insert_data_interactions(mysql_pw, update.update_id, telegram_user_id, chat_id, "bot", text_ollama_no_message, link, "OLLAMA WITHOUT MESSAGE")
+                    else:
+                        insert_data_interactions(mysql_pw, update.update_id, telegram_user_id, chat_id, "bot", text_ollama_no_message, None, "OLLAMA WITHOUT MESSAGE")
+
+            except Exception as e:
+                print(f"Ollama falhou: {e}")
+                
+                if link:
+                    text_ollama_failed_link = "Não consegui gerar uma resposta, mas vou tentar processar o áudio."
+                    await bot.send_message(
+                        chat_id=chat_id,
+                        text=text_ollama_failed_link
+                    )
+                    insert_data_interactions(mysql_pw, update.update_id, telegram_user_id, chat_id, "bot", text_ollama_failed_link, link, "OLLAMA FAILED")
+                else:
+                    text_ollama_failed = "Não consegui gerar uma resposta."
+                    await bot.send_message(
+                        chat_id=chat_id,
+                        text=text_ollama_failed
+                    )
+                    insert_data_interactions(mysql_pw, update.update_id, telegram_user_id, chat_id, "bot", text_ollama_failed, None, "OLLAMA FAILED")
+
+            if link:
+
+                # Impede conflitos se duas tarefas tentarem usar o mesmo ficheiro ao mesmo tempo
+                async with download_lock:
+
+                    # Faz o download numa thread separada
+                    audio_path = await asyncio.to_thread(dlp.download_music, link)
+
+                    # Se o download tiver criado um ficheiro válido, envia o áudio
+                    if audio_path:
+                        try:
+                            # Abre o ficheiro de áudio em modo binário
+                            with open(audio_path, "rb") as audio_file:
+
+                                # Envia o áudio para o chat correto
+                                await bot.send_audio(
+                                    chat_id=chat_id,
+                                    audio=audio_file,
+                                    title=video_info.get("title") if video_info else None,
+                                    performer=video_info.get("uploader") if video_info else None,
+                                    read_timeout=120,
+                                    write_timeout=120,
+                                    connect_timeout=60,
+                                    pool_timeout=60
+                                )
+
+                        # Apaga o ficheiro depois de enviar, mesmo que ocorra algum erro no envio
+                        finally:
+                            if os.path.exists(audio_path):
+                                os.remove(audio_path)
+
+            # Se não houver link, apenas escreve isso na consola
             else:
-                text_ollama_failed = "Não consegui gerar uma resposta."
-                await bot.send_message(
-                    chat_id=chat_id,
-                    text=text_ollama_failed
-                )
-                insert_data_interactions(mysql_pw, update.update_id, telegram_user_id, chat_id, "bot", text_ollama_failed, None, "OLLAMA FAILED")
+                print("Mensagem sem link do YouTube.")
 
-        if link:
+            # Mostra na consola para que chat a mensagem foi tratada
+            print("Mensagem enviada para:", chat_id)
 
-            # Impede conflitos se duas tarefas tentarem usar o mesmo ficheiro ao mesmo tempo
-            async with download_lock:
-
-                # Faz o download numa thread separada
-                audio_path = await asyncio.to_thread(dlp.download_music, link)
-
-                # Se o download tiver criado um ficheiro válido, envia o áudio
-                if audio_path:
-                    try:
-                        # Abre o ficheiro de áudio em modo binário
-                        with open(audio_path, "rb") as audio_file:
-
-                            # Envia o áudio para o chat correto
-                            await bot.send_audio(
-                                chat_id=chat_id,
-                                audio=audio_file,
-                                title=video_info.get("title") if video_info else None,
-                                performer=video_info.get("uploader") if video_info else None,
-                                read_timeout=120,
-                                write_timeout=120,
-                                connect_timeout=60,
-                                pool_timeout=60
-                            )
-
-                    # Apaga o ficheiro depois de enviar, mesmo que ocorra algum erro no envio
-                    finally:
-                        if os.path.exists(audio_path):
-                            os.remove(audio_path)
-
-        # Se não houver link, apenas escreve isso na consola
         else:
-            print("Mensagem sem link do YouTube.")
 
-        # Mostra na consola para que chat a mensagem foi tratada
-        print("Mensagem enviada para:", chat_id)
+            # Caso o utilizador não tenha escrito "/start"
+            failed_start = "Utilizador deve escrever /start"
+            print(failed_start)
+            await bot.send_message(
+                chat_id=chat_id,
+                text=failed_start
+            )
 
 
 async def main(token, api_key, mysql_pw):
